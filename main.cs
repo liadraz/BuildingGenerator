@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Autodesk.AutoCAD.Runtime;
@@ -13,8 +13,8 @@ namespace BuildingGenerator
 {
     public class Commands
     {
-        [CommandMethod("GENERATE_FULL_PLAN")]
-        public void GenerateFullPlan()
+        [CommandMethod("To_Graphics")]
+        public void To_Graphics()
         {
             Document doc = Application.DocumentManager.MdiActiveDocument;
             Database db = doc.Database;
@@ -26,40 +26,37 @@ namespace BuildingGenerator
                 {
                     BlockTableRecord btr = (BlockTableRecord)tr.GetObject(db.CurrentSpaceId, OpenMode.ForWrite);
                     
-                    // יצירת שכבות עבודה
                     EnsureLayerExists(tr, db, "W_HATCH");
                     EnsureLayerExists(tr, db, "30");
-                    EnsureLayerExists(tr, db, "TEMP_3");
-                    EnsureLayerExists(tr, db, "TEMP_4");
+                    EnsureLayerExists(tr, db, "20");
 
                     TypedValue[] filter = {
                         new TypedValue((int)DxfCode.Start, "LWPOLYLINE"),
                         new TypedValue((int)DxfCode.Operator, "<OR"),
                             new TypedValue((int)DxfCode.LayerName, "20"),
                             new TypedValue((int)DxfCode.LayerName, "30"),
-                            new TypedValue((int)DxfCode.LayerName, "CORE"),
                         new TypedValue((int)DxfCode.Operator, "OR>")
                     };
                     
                     PromptSelectionResult selRes = ed.GetSelection(new SelectionFilter(filter));
                     if (selRes.Status != PromptStatus.OK) return;
 
-                    List<Polyline> mainBuildings = new List<Polyline>();
+
+                    List<Polyline> plBuilding = new List<Polyline>();
                     List<Polyline> balconies = new List<Polyline>();
-                    List<Polyline> cores = new List<Polyline>();
 
                     foreach (ObjectId id in selRes.Value.GetObjectIds())
                     {
                         Polyline pl = tr.GetObject(id, OpenMode.ForRead) as Polyline;
                         if (pl == null || !pl.Closed) continue;
 
-                        if (pl.Layer == "30") mainBuildings.Add(pl);
+                        if (pl.Layer == "30") plBuilding.Add(pl);
                         else if (pl.Layer == "20") balconies.Add(pl);
-                        else if (pl.Layer == "CORE") cores.Add(pl);
                     }
 
-                    // עיבוד בניינים (ללא שינוי)
-                    foreach (Polyline bld in mainBuildings)
+
+                    // Create the building contour using booleans
+                    foreach (Polyline bld in plBuilding)
                     {
                         var bldRegs = Region.CreateFromCurves(new DBObjectCollection { bld });
                         if (bldRegs.Count == 0) continue;
@@ -69,46 +66,49 @@ namespace BuildingGenerator
                         {
                             if (DoExtentsOverlap(bld.GeometricExtents, bal.GeometricExtents))
                             {
-                                CreateBalconyHatch(tr, btr, bal);
                                 var balRegs = Region.CreateFromCurves(new DBObjectCollection { bal });
                                 if (balRegs.Count > 0)
+                                {
+                                    // 3. ביצוע החיסור (Boolean Subtract)
                                     finalReg.BooleanOperation(BooleanOperationType.BoolSubtract, balRegs[0] as Region);
+                                }
                             }
                         }
 
-                        Polyline line1 = ProcessProcessedRegion(tr, btr, ed, finalReg, "30");
-                        if (line1 != null) ApplyWallLogic(tr, btr, line1, false);
+                        Polyline exteriorContour = ConvertRegionToPolyline(tr, btr, finalReg, "30");
 
                         bld.UpgradeOpen();
                         bld.Erase();
                         finalReg.Dispose();
                     }
 
-                    // --- עיבוד גרעינים עם מילוי לבן בשכבה 30 ---
-                    foreach (Polyline line3 in cores)
-                    {
-                        line3.UpgradeOpen();
-                        line3.Layer = "30"; // העברה ישירה לשכבה 30
+
+                    // // --- עיבוד גרעינים עם מילוי לבן בשכבה 30 ---
+                    // foreach (Polyline line3 in cores)
+                    // {
+                    //     line3.UpgradeOpen();
+                    //     line3.Layer = "30"; // העברה ישירה לשכבה 30
                         
-                        // יצירת אובייקט 4 - הקו הפנימי
-                        DBObjectCollection offsets = line3.GetOffsetCurves(-0.2);
-                        if (offsets.Count > 0)
-                        {
-                            Polyline line4 = offsets[0] as Polyline;
-                            line4.Layer = "30"; // גם הקו הפנימי בשכבה 30
-                            btr.AppendEntity(line4);
-                            tr.AddNewlyCreatedDBObject(line4, true);
+                    //     // יצירת אובייקט 4 - הקו הפנימי
+                    //     DBObjectCollection offsets = line3.GetOffsetCurves(-0.2);
+                    //     if (offsets.Count > 0)
+                    //     {
+                    //         Polyline line4 = offsets[0] as Polyline;
+                    //         line4.Layer = "30"; // גם הקו הפנימי בשכבה 30
+                    //         btr.AppendEntity(line4);
+                    //         tr.AddNewlyCreatedDBObject(line4, true);
 
-                            // מילוי לבן בתוך הקו הפנימי - בשכבה 30
-                            CreateHatchOnLayer(tr, btr, line4.ObjectId, "30", 7);
+                    //         // מילוי לבן בתוך הקו הפנימי - בשכבה 30
+                    //         CreateHatchOnLayer(tr, btr, line4.ObjectId, "30", 7);
 
-                            // יצירת קיר אפור בין הקו החיצוני לפנימי
-                            CreateWallHatch(tr, btr, line3.ObjectId, line4.ObjectId);
-                        }
-                    }
+                    //         // יצירת קיר אפור בין הקו החיצוני לפנימי
+                    //         CreateWallHatch(tr, btr, line3.ObjectId, line4.ObjectId);
+                    //     }
+                    // }
+
 
                     tr.Commit();
-                    ed.WriteMessage("\nPlan processed successfully - core inner areas filled white in layer 30.");
+                    ed.WriteMessage("\nPlan processed successfully");
                 }
                 catch (System.Exception ex)
                 {
@@ -160,30 +160,55 @@ namespace BuildingGenerator
             }
         }
 
-        private Polyline ProcessProcessedRegion(Transaction tr, BlockTableRecord btr, Editor ed, Region reg, string layer)
+        // private Polyline ProcessProcessedRegion(Transaction tr, BlockTableRecord btr, Editor ed, Region reg, string layer)
+        // {
+        //     DBObjectCollection exploded = new DBObjectCollection();
+        //     reg.Explode(exploded);
+        //     ObjectIdCollection ids = new ObjectIdCollection();
+        //     foreach (DBObject obj in exploded)
+        //     {
+        //         Entity ent = obj as Entity;
+        //         ent.Layer = layer;
+        //         ids.Add(btr.AppendEntity(ent));
+        //         tr.AddNewlyCreatedDBObject(ent, true);
+        //     }
+        //     object oldPeditAccept = Application.GetSystemVariable("PEDITACCEPT");
+        //     Application.SetSystemVariable("PEDITACCEPT", 1);
+        //     try {
+        //         SelectionSet ss = SelectionSet.FromObjectIds(ids.Cast<ObjectId>().ToArray());
+        //         ed.Command("_.PEDIT", "_M", ss, "", "_J", "0.0", "");
+        //         Application.SetSystemVariable("PEDITACCEPT", oldPeditAccept);
+        //         PromptSelectionResult lastObj = ed.SelectLast();
+        //         return (lastObj.Status == PromptStatus.OK) ? tr.GetObject(lastObj.Value.GetObjectIds()[0], OpenMode.ForWrite) as Polyline : null;
+        //     } catch {
+        //         Application.SetSystemVariable("PEDITACCEPT", oldPeditAccept);
+        //         return null;
+        //     }
+        // }
+
+        private Polyline ConvertRegionToPolyline(Transaction tr, BlockTableRecord btr, Region reg, string layer)
         {
             DBObjectCollection exploded = new DBObjectCollection();
             reg.Explode(exploded);
-            ObjectIdCollection ids = new ObjectIdCollection();
-            foreach (DBObject obj in exploded)
+
+            if (exploded.Count > 0)
             {
-                Entity ent = obj as Entity;
-                ent.Layer = layer;
-                ids.Add(btr.AppendEntity(ent));
-                tr.AddNewlyCreatedDBObject(ent, true);
+                Polyline poly = exploded[0] as Polyline;
+                if (poly == null) return null;
+
+                poly.Layer = layer;
+                
+                Entity[] entitiesToJoin = new Entity[exploded.Count - 1];
+                for (int i = 1; i < exploded.Count; i++) entitiesToJoin[i - 1] = (Entity)exploded[i];
+
+                poly.JoinEntities(entitiesToJoin);
+                
+                btr.AppendEntity(poly);
+                tr.AddNewlyCreatedDBObject(poly, true);
+                return poly;
             }
-            object oldPeditAccept = Application.GetSystemVariable("PEDITACCEPT");
-            Application.SetSystemVariable("PEDITACCEPT", 1);
-            try {
-                SelectionSet ss = SelectionSet.FromObjectIds(ids.Cast<ObjectId>().ToArray());
-                ed.Command("_.PEDIT", "_M", ss, "", "_J", "0.0", "");
-                Application.SetSystemVariable("PEDITACCEPT", oldPeditAccept);
-                PromptSelectionResult lastObj = ed.SelectLast();
-                return (lastObj.Status == PromptStatus.OK) ? tr.GetObject(lastObj.Value.GetObjectIds()[0], OpenMode.ForWrite) as Polyline : null;
-            } catch {
-                Application.SetSystemVariable("PEDITACCEPT", oldPeditAccept);
-                return null;
-            }
+
+            return null;
         }
 
         private void CreateBalconyHatch(Transaction tr, BlockTableRecord btr, Polyline pl)
@@ -219,3 +244,13 @@ namespace BuildingGenerator
         }
     }
 }
+
+// ToDO
+// DO OFFSET
+// BALCONY add hatch
+// deal with core somehow
+// core offset suppost to be inside not outside
+// white hatch for fill should work
+// add an option with or without the gray wall hatch
+// balcony hatch should be Scale 0.2 
+// trim the aprtments divitions if the offset goes beyond the building polyline
